@@ -13,6 +13,7 @@ from shutil import get_terminal_size
 from signal import SIG_DFL, SIGPIPE, signal
 from sys import stdin
 from typing import Callable, Dict, Iterator, List, Tuple, cast
+import unicodedata
 
 
 class ColourSpace(Enum):
@@ -186,22 +187,21 @@ def lerp(c1: RGB, c2: RGB, mix: float) -> RGB:
     return cast(RGB, tuple(new))
 
 
-def rgb_gen(palette: Palette, rep: int) -> Iterator[RGB]:
-    gen = cycle(palette)
-
-    period = pi * pi / 2
-
+def rgb_fun(palette: Palette, rep: int) -> Callable[[float], Iterator[RGB]]:
     def wave(t: float) -> float:
-        x = t / rep * period
-        return sin(x / pi + pi / 2)
+        x = t * pi / 2
+        return sin(x + pi / 2)
 
-    prev = next(gen)
-    while True:
-        curr = next(gen)
-        for t in range(0, rep + 1):
-            mix = wave(t)
-            yield lerp(prev, curr, mix)
-        prev = curr
+    def fun(t: float) -> RGB:
+        t = t / rep
+        i = int(t) # palette item
+        t = t - i # between 0 and 1
+        prev = palette[i % len(palette)]
+        curr = palette[(i+1) % len(palette)]
+        mix = wave(t)
+        return lerp(prev, curr, mix)
+
+    return fun
 
 
 def decor_8(rgb: RGB) -> Iterator[str]:
@@ -247,21 +247,61 @@ def paint_flag(colour_space: ColourSpace, spec: FlagSpec) -> Iterator[str]:
             yield "\n"
 
 
+class CursorModel(object):
+    """Keeps track of the x,y coordinates in the terminal given output
+chars and newlines."""
+    def __init__(self):
+        self.cols, _ = get_terminal_size((80, 140))
+        self.x = 0
+        self.y = 0
+
+    def putchar(self, char):
+        try:
+            width = unicodedata.east_asian_width(char)
+        except Exception:
+            width = None
+
+        if char == '\t':
+            # Blindly assume that tab width is 8.
+            self.x += (8 - self.x % 8)
+        elif width == 'W':
+            # Fullwidth cjk normally takes up two columns.
+            self.x += 2
+        elif width == 'N':
+            # Used for unprintable characters.
+            pass
+        else:
+            # Anything else takes up 1 column (probably).
+            self.x += 1
+
+        # Handle line wrapping
+        if self.x >= self.cols:
+            self.x -= self.cols
+            self.y += 1
+
+    def newline(self):
+        self.x = 0
+        self.y += 1
+
+
 def colourize(
     colour_space: ColourSpace, spec: FlagSpec, period: int, lines: Iterator[str],
 ) -> Iterator[Iterator[str]]:
     palette = flag_colours(spec)
-    colour_gen = rgb_gen(palette, period)
+    colour_gen = rgb_fun(palette, period)
     fg_esc, _, decor = decor_for(colour_space)
+    cursor = CursorModel()
     for line in lines:
 
         def gen() -> Iterator[str]:
             for char in line:
-                colour = next(colour_gen)
+                colour = colour_gen(float(cursor.x + 1.5*cursor.y))
                 yield fg_esc
                 yield from decor(colour)
                 yield "m"
                 yield char
+                cursor.putchar(char)
+            cursor.newline()
             yield "\033[0m"
             yield "\n"
 
